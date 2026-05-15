@@ -50,6 +50,7 @@ TABLES = {
     "meup":            os.getenv("NOCODB_TABLE_MEUP",           "m3kqbqqloknqpdn"),
     "price_lists":     os.getenv("NOCODB_TABLE_PRICE_LISTS",    "mafhrxq41mgl7ly"),
     "linkplans":       os.getenv("NOCODB_TABLE_LINKPLANS",      "mxsx2sfxzeq3hbq"),  # ProjectA
+    "templates":       os.getenv("NOCODB_TABLE_TEMPLATES",      "m5kr4eazaqaxtm1"),
 }
 
 SMTP_HOST    = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -221,68 +222,56 @@ async def nocodb_list_page(table_id: str, where: str = "", fields: list[str] = N
 airtable_list   = nocodb_list
 airtable_update = nocodb_update
 
-# ─── Templates de email ───────────────────────────────────────────────────────
+# ─── Templates de email (dinámicos desde NocoDB) ─────────────────────────────
 
-def template_wf1_deal(row: dict) -> tuple[str, str]:
-    """WF1 rama 'Ya tenemos deal' (W=yes). Devuelve (subject, body_html)."""
-    domain = row.get("Domain", row.get("Website", ""))
-    subject = f"Re: Colaboración editorial — {domain}"
-    body = f"""
-    <p>Hola,</p>
-    <p>Quería confirmar la colaboración para publicar un artículo en <strong>{domain}</strong>.</p>
-    <p>Nos ponemos en contacto para coordinar los próximos pasos.</p>
-    <p>¿Podés confirmar los detalles del acuerdo?</p>
-    <br>
-    <p>Saludos,<br>Felipe<br>KokoLinks Media</p>
-    """
+async def get_template(wf_id: str) -> dict:
+    """Lee el template de NocoDB por wf_id."""
+    table_id = TABLES["templates"]
+    data = await nocodb_list_page(table_id, where=f"(wf_id,eq,{wf_id})", limit=1)
+    records = data.get("list", [])
+    return records[0] if records else {}
+
+
+def render_template(tpl: dict, vars: dict) -> tuple[str, str]:
+    """Reemplaza {variable} en asunto y cuerpo con los valores reales."""
+    subject = tpl.get("asunto", "")
+    body    = tpl.get("cuerpo", "")
+    for key, val in vars.items():
+        subject = subject.replace("{" + key + "}", str(val))
+        body    = body.replace("{" + key + "}", str(val))
     return subject, body
 
 
-def template_wf1_new(row: dict) -> tuple[str, str]:
-    """WF1 rama 'No tenemos deal' (W=new). Primera propuesta."""
+async def template_wf1_deal(row: dict) -> tuple[str, str]:
     domain = row.get("Domain", row.get("Website", ""))
-    subject = f"Propuesta de colaboración — {domain}"
-    body = f"""
-    <p>Hola,</p>
-    <p>Mi nombre es Felipe, soy de KokoLinks Media. Nos especializamos en contenido editorial de calidad.</p>
-    <p>Nos gustaría publicar un artículo en <strong>{domain}</strong>. ¿Estarían interesados en una colaboración?</p>
-    <p>Podemos adaptarnos a sus guidelines editoriales y temáticas.</p>
-    <br>
-    <p>¿Tienen disponibilidad para una llamada rápida esta semana?</p>
-    <br>
-    <p>Saludos,<br>Felipe<br>KokoLinks Media</p>
-    """
-    return subject, body
+    tpl = await get_template("wf1_deal")
+    if not tpl:
+        return f"Re: Colaboración editorial — {domain}", f"<p>Confirmamos colaboración para <strong>{domain}</strong>.</p>"
+    return render_template(tpl, {"domain": domain})
 
 
-def template_wf3(row: dict, article_url: str = "") -> tuple[str, str]:
-    """WF3 — Enviar artículo al cliente para revisión."""
+async def template_wf1_new(row: dict) -> tuple[str, str]:
     domain = row.get("Domain", row.get("Website", ""))
-    subject = f"Artículo listo para revisión — {domain}"
-    body = f"""
-    <p>Hola,</p>
-    <p>El artículo para <strong>{domain}</strong> ya está listo para tu revisión.</p>
-    {"<p>Podés verlo aquí: <a href='" + article_url + "'>" + article_url + "</a></p>" if article_url else ""}
-    <p>Por favor avisanos si tenés comentarios o si está aprobado para proceder con la publicación.</p>
-    <br>
-    <p>Saludos,<br>KokoLinks Media</p>
-    """
-    return subject, body
+    tpl = await get_template("wf1_new")
+    if not tpl:
+        return f"Propuesta de colaboración — {domain}", f"<p>Propuesta para <strong>{domain}</strong>.</p>"
+    return render_template(tpl, {"domain": domain})
 
 
-def template_wf4(row: dict) -> tuple[str, str]:
-    """WF4 — Email al medio para publicar el artículo aprobado."""
+async def template_wf3(row: dict, article_url: str = "") -> tuple[str, str]:
     domain = row.get("Domain", row.get("Website", ""))
-    subject = f"Artículo aprobado — listo para publicar en {domain}"
-    body = f"""
-    <p>Hola,</p>
-    <p>El artículo ha sido revisado y aprobado por nuestro cliente.</p>
-    <p>¿Pueden proceder con la publicación en <strong>{domain}</strong>?</p>
-    <p>Quedamos atentos para confirmar la URL live una vez publicado.</p>
-    <br>
-    <p>Saludos,<br>Felipe<br>KokoLinks Media</p>
-    """
-    return subject, body
+    tpl = await get_template("wf3_cliente")
+    if not tpl:
+        return f"Artículo listo para revisión — {domain}", f"<p>Artículo para <strong>{domain}</strong> listo.</p>"
+    return render_template(tpl, {"domain": domain, "article_url": article_url})
+
+
+async def template_wf4(row: dict) -> tuple[str, str]:
+    domain = row.get("Domain", row.get("Website", ""))
+    tpl = await get_template("wf4_medio")
+    if not tpl:
+        return f"Artículo aprobado — {domain}", f"<p>Artículo aprobado para <strong>{domain}</strong>.</p>"
+    return render_template(tpl, {"domain": domain})
 
 # ─── WF1 ──────────────────────────────────────────────────────────────────────
 
@@ -321,10 +310,10 @@ async def wf1_trigger(req: WF1Request):
 
         try:
             if "yes" in w_value:
-                subject, body = template_wf1_deal(fields)
+                subject, body = await template_wf1_deal(fields)
                 branch = "deal"
             else:
-                subject, body = template_wf1_new(fields)
+                subject, body = await template_wf1_new(fields)
                 branch = "new"
 
             result = send_email(email_to, subject, body)
@@ -392,7 +381,7 @@ async def wf3_trigger(req: WF3Request):
             continue
 
         try:
-            subject, body = template_wf3(fields, article_url)
+            subject, body = await template_wf3(fields, article_url)
             result = send_email(client_email, subject, body)
 
             await airtable_update(req.linkplan_table_id, rec_id, {
@@ -450,7 +439,7 @@ async def wf4_trigger(req: WF4Request):
             continue
 
         try:
-            subject, body = template_wf4(fields)
+            subject, body = await template_wf4(fields)
             result = send_email(email_to, subject, body)
 
             await airtable_update(req.linkplan_table_id, rec_id, {
@@ -943,6 +932,42 @@ async def api_pricelists(
         "is_last_page": page_info.get("isLastPage", True),
         "records": records,
     }
+
+
+class TemplateUpdate(BaseModel):
+    asunto: Optional[str] = None
+    cuerpo: Optional[str] = None
+    activo: Optional[bool] = None
+
+
+@app.get("/api/templates")
+async def api_templates_list():
+    """Devuelve los 4 templates de email editables."""
+    table_id = TABLES["templates"]
+    data = await nocodb_list_page(table_id, limit=20)
+    return {"records": data.get("list", [])}
+
+
+@app.patch("/api/templates/{record_id}")
+async def api_template_update(record_id: str, data: TemplateUpdate):
+    """Actualiza asunto y/o cuerpo de un template."""
+    table_id = TABLES["templates"]
+    fields = {k: v for k, v in data.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=422, detail="Sin campos para actualizar")
+    result = await nocodb_update(table_id, record_id, fields)
+    return result
+
+
+@app.get("/api/templates/{wf_id}")
+async def api_template_by_wf(wf_id: str):
+    """Obtiene un template por wf_id (wf1_deal, wf1_new, wf3_cliente, wf4_medio)."""
+    table_id = TABLES["templates"]
+    data = await nocodb_list_page(table_id, where=f"(wf_id,eq,{wf_id})", limit=1)
+    records = data.get("list", [])
+    if not records:
+        raise HTTPException(status_code=404, detail=f"Template '{wf_id}' no encontrado")
+    return records[0]
 
 
 @app.get("/health")
