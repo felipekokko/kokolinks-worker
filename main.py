@@ -895,6 +895,56 @@ async def status():
     return {"table": table_id, "counts": counts}
 
 
+@app.get("/api/pricelists")
+async def api_pricelists(
+    search: Optional[str] = Query(None, description="Buscar por dominio"),
+    country: Optional[str] = Query(None, description="Filtrar por país"),
+    limit: int = Query(100, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Devuelve la tabla Price Lists con columnas clave por proveedor.
+    Columnas: Website, Country, DR, Traffic, Precio Kokko, Bazoom, Leolytics, WhitePress, BacklinksGlobal, MeUp
+    """
+    table_id = TABLES["price_lists"]
+
+    where_parts = []
+    if search:
+        where_parts.append(f"(Website,like,%{search}%)")
+    if country:
+        where_parts.append(f"(Country,like,%{country}%)")
+    where = "~and".join(where_parts)
+
+    data = await nocodb_list_page(table_id, where=where, limit=limit, offset=offset)
+    rows = data.get("list", [])
+    page_info = data.get("pageInfo", {})
+
+    records = []
+    for r in rows:
+        records.append({
+            "id":           str(r.get("Id", "")),
+            "website":      r.get("Website") or r.get("col_0") or "",
+            "bbdd":         r.get("¿BBDD?") or r.get("col_1") or "",
+            "country":      r.get("Country") or r.get("col_2") or "",
+            "dr":           r.get("DR") or r.get("col_3") or "",
+            "traffic":      r.get("Traffic") or r.get("col_4") or "",
+            "precio_kokko": r.get("PRECIOS KOKKO") or r.get("col_5") or "",
+            "p_casino":     r.get("P. CASINO") or r.get("col_6") or "",
+            "bazoom":       r.get("PRECIO") or r.get("col_8") or "",
+            "leolytics":    r.get("PRECIO_1") or r.get("col_11") or "",
+            "whitepress":   r.get("PRECIO_2") or r.get("col_14") or "",
+            "backlinks":    r.get("PRECIO_3") or r.get("col_17") or "",
+            "meup":         r.get("PRECIO_4") or r.get("col_18") or "",
+        })
+
+    return {
+        "total": page_info.get("totalRows", len(records)),
+        "offset": offset,
+        "is_last_page": page_info.get("isLastPage", True),
+        "records": records,
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "kokolinks-worker"}
