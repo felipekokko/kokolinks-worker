@@ -23,7 +23,6 @@ import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
-from functools import lru_cache
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Query, Depends
@@ -38,29 +37,29 @@ logger = logging.getLogger("kokolinks")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-AIRTABLE_TOKEN        = os.getenv("AIRTABLE_TOKEN", "")
-AIRTABLE_BASE_ID      = os.getenv("AIRTABLE_BASE_ID", "appylJdRa0zf25zM8")
-WEBHOOK_SECRET        = os.getenv("WEBHOOK_SECRET", "")
+NOCODB_URL   = os.getenv("NOCODB_URL",   "http://nocodb-xyd190woraek9xbik7c8heq4.86.48.2.187.sslip.io")
+NOCODB_TOKEN = os.getenv("NOCODB_TOKEN", "hhftPqJQkyoE-8oBu5UYVgYAVHmOHFduQ7qSeR9h")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
-# Tablas del Comparador de Precios
+# IDs de tablas NocoDB (Prices Comparison)
 TABLES = {
-    "bazoom":            os.getenv("AIRTABLE_TABLE_BAZOOM",            "tblMRnwr67026ggse"),
-    "leolytics":         os.getenv("AIRTABLE_TABLE_LEOLYTICS",         "tblyf14FQ7nKTnOrC"),
-    "whitepress":        os.getenv("AIRTABLE_TABLE_WHITEPRESS",        "tbl2O6rVwbmRJ5yoD"),
-    "backlinksglobal":   os.getenv("AIRTABLE_TABLE_BACKLINKS_GLOBAL",  "tbl4wdz1WOiQIj4XI"),
-    "meup":              os.getenv("AIRTABLE_TABLE_MEUP",              "tblGN80HtAMQ5xDwQ"),
-    "price_lists":       os.getenv("AIRTABLE_TABLE_PRICE_LISTS",       "tblSJRmwRIrQXW6bv"),
-    "linkplans":         os.getenv("AIRTABLE_LINKPLANS_TABLE",         "tblzSdWocIxnZYk9Y"),
+    "bazoom":          os.getenv("NOCODB_TABLE_BAZOOM",         "mbdpznnm0mxolaj"),
+    "leolytics":       os.getenv("NOCODB_TABLE_LEOLYTICS",      "mwx5usficvhvqz3"),
+    "whitepress":      os.getenv("NOCODB_TABLE_WHITEPRESS",     "me6qowoq4qaetdn"),
+    "backlinksglobal": os.getenv("NOCODB_TABLE_BACKLINKS",      "m01r3pqfw2hrrfa"),
+    "meup":            os.getenv("NOCODB_TABLE_MEUP",           "m3kqbqqloknqpdn"),
+    "price_lists":     os.getenv("NOCODB_TABLE_PRICE_LISTS",    "mafhrxq41mgl7ly"),
+    "linkplans":       os.getenv("NOCODB_TABLE_LINKPLANS",      "mxsx2sfxzeq3hbq"),  # ProjectA
 }
 
-SMTP_HOST   = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT   = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER   = os.getenv("SMTP_USER", "kokolinkstools@gmail.com")
-SMTP_PASS   = os.getenv("SMTP_PASS", "")
+SMTP_HOST    = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT    = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER    = os.getenv("SMTP_USER", "kokolinkstools@gmail.com")
+SMTP_PASS    = os.getenv("SMTP_PASS", "")
 GMAIL_SENDER = os.getenv("GMAIL_SENDER", SMTP_USER)
 
-AIRTABLE_HEADERS = {
-    "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+NOCODB_HEADERS = {
+    "xc-token":     NOCODB_TOKEN,
     "Content-Type": "application/json",
 }
 
@@ -134,61 +133,95 @@ def send_email(to: str, subject: str, body_html: str) -> dict:
         "gmail_url":  f"https://mail.google.com/mail/u/0/#sent",
     }
 
-# ─── Airtable helpers ─────────────────────────────────────────────────────────
+# ─── NocoDB helpers ───────────────────────────────────────────────────────────
 
-async def airtable_list(table_id: str, filter_formula: str, fields: list[str] = None) -> list[dict]:
-    """Lista registros de una tabla con filterByFormula."""
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}"
-    params = {"filterByFormula": filter_formula}
+def _noco_url(table_id: str) -> str:
+    return f"{NOCODB_URL}/api/v2/tables/{table_id}/records"
+
+
+async def nocodb_list(table_id: str, where: str = "", fields: list[str] = None) -> list[dict]:
+    """Lista todos los registros de una tabla NocoDB con paginación automática."""
+    params: dict = {"limit": 100, "offset": 0}
+    if where:
+        params["where"] = where
     if fields:
-        params["fields[]"] = fields
+        params["fields"] = ",".join(fields)
 
     records = []
     async with httpx.AsyncClient(timeout=30) as client:
         while True:
-            resp = await client.get(url, headers=AIRTABLE_HEADERS, params=params)
+            resp = await client.get(_noco_url(table_id), headers=NOCODB_HEADERS, params=params)
             if resp.status_code != 200:
-                logger.error(f"Airtable list error {resp.status_code}: {resp.text}")
-                raise HTTPException(status_code=502, detail=f"Airtable error: {resp.text}")
+                logger.error(f"NocoDB list error {resp.status_code}: {resp.text}")
+                raise HTTPException(status_code=502, detail=f"NocoDB error: {resp.text}")
             data = resp.json()
-            records.extend(data.get("records", []))
-            offset = data.get("offset")
-            if not offset:
+            batch = data.get("list", [])
+            records.extend(batch)
+            page_info = data.get("pageInfo", {})
+            if page_info.get("isLastPage", True) or not batch:
                 break
-            params["offset"] = offset
+            params["offset"] += 100
 
-    return records
+    # Normalizar al formato {id, fields} que usa el resto del código
+    return [{"id": str(r.get("Id", r.get("id", ""))), "fields": r} for r in records]
 
 
-async def airtable_update(table_id: str, record_id: str, fields: dict) -> dict:
-    """Actualiza un registro en Airtable (PATCH)."""
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}/{record_id}"
+async def nocodb_update(table_id: str, record_id: str, fields: dict) -> dict:
+    """Actualiza un registro en NocoDB (PATCH)."""
+    url = f"{NOCODB_URL}/api/v2/tables/{table_id}/records"
+    payload = {"Id": int(record_id) if record_id.isdigit() else record_id}
+    payload.update(fields)
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.patch(url, headers=AIRTABLE_HEADERS, json={"fields": fields})
+        resp = await client.patch(url, headers=NOCODB_HEADERS, json=payload)
         if resp.status_code not in (200, 201):
-            logger.error(f"Airtable update error {resp.status_code}: {resp.text}")
-            raise HTTPException(status_code=502, detail=f"Airtable update error: {resp.text}")
-        return resp.json()
+            logger.error(f"NocoDB update error {resp.status_code}: {resp.text}")
+            raise HTTPException(status_code=502, detail=f"NocoDB update error: {resp.text}")
+        return {"id": str(record_id), "fields": resp.json()}
 
 
-async def airtable_list_all_pages(table_id: str, fields: list[str] = None, page_size: int = 100, offset: str = None) -> dict:
-    """Pagina manualmente (para el endpoint /api/medios)."""
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}"
-    params = {"pageSize": page_size}
-    if fields:
-        params["fields[]"] = fields
-    if offset:
-        params["offset"] = offset
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=AIRTABLE_HEADERS, params=params)
+async def nocodb_get(table_id: str, record_id: str) -> dict:
+    """Obtiene un registro por ID."""
+    url = f"{NOCODB_URL}/api/v2/tables/{table_id}/records/{record_id}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=NOCODB_HEADERS)
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Registro no encontrado")
         if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Airtable error: {resp.text}")
+            raise HTTPException(status_code=502, detail=f"NocoDB error: {resp.text}")
+        r = resp.json()
+        return {"id": str(r.get("Id", record_id)), "fields": r}
+
+
+async def nocodb_create(table_id: str, fields: dict) -> dict:
+    """Crea un registro en NocoDB."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(_noco_url(table_id), headers=NOCODB_HEADERS, json=fields)
+        if resp.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"NocoDB error: {resp.text}")
+        r = resp.json()
+        return {"id": str(r.get("Id", "")), "fields": r}
+
+
+async def nocodb_list_page(table_id: str, where: str = "", fields: list[str] = None,
+                           limit: int = 100, offset: int = 0) -> dict:
+    """Una sola página de registros (para /api/medios)."""
+    params: dict = {"limit": limit, "offset": offset}
+    if where:
+        params["where"] = where
+    if fields:
+        params["fields"] = ",".join(fields)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(_noco_url(table_id), headers=NOCODB_HEADERS, params=params)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"NocoDB error: {resp.text}")
         return resp.json()
+
+
+# Alias para compatibilidad con el código de WFs
+airtable_list   = nocodb_list
+airtable_update = nocodb_update
 
 # ─── Templates de email ───────────────────────────────────────────────────────
-# Los templates se pueden externalizar a Airtable en el futuro.
-# Por ahora están acá como strings base para que Felipe los ajuste.
 
 def template_wf1_deal(row: dict) -> tuple[str, str]:
     """WF1 rama 'Ya tenemos deal' (W=yes). Devuelve (subject, body_html)."""
@@ -558,35 +591,25 @@ async def api_prices(domain: str = Query(..., description="Dominio a buscar, ej:
     target = normalize_domain(domain)
     results = {}
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        for provider, table_id in PROVIDER_TABLES.items():
-            # Buscamos con FIND para hacer match parcial (el campo puede tener https:// o www.)
-            formula = f"FIND('{target}',LOWER({{Website}}))"
-            url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}"
-            params = {"filterByFormula": formula, "pageSize": 5}
-
-            try:
-                resp = await client.get(url, headers=AIRTABLE_HEADERS, params=params)
-                if resp.status_code != 200:
-                    results[provider] = {"error": f"HTTP {resp.status_code}"}
-                    continue
-
-                records = resp.json().get("records", [])
-                if not records:
-                    results[provider] = {"found": False}
-                    continue
-
-                f = records[0]["fields"]
-                results[provider] = {
-                    "found": True,
-                    "domain": find_field(f, DOMAIN_FIELD_CANDIDATES),
-                    "price": find_field(f, PRICE_FIELD_CANDIDATES),
-                    "dr": find_field(f, DR_FIELD_CANDIDATES),
-                    "record_id": records[0]["id"],
-                    "raw_fields": f,  # para debug; quitar en prod si hay campos sensibles
-                }
-            except Exception as e:
-                results[provider] = {"error": str(e)}
+    for provider, table_id in PROVIDER_TABLES.items():
+        try:
+            where = f"(Website,like,%{target}%)"
+            data = await nocodb_list_page(table_id, where=where, limit=5)
+            records = data.get("list", [])
+            if not records:
+                results[provider] = {"found": False}
+                continue
+            f = records[0]
+            results[provider] = {
+                "found": True,
+                "domain": find_field(f, DOMAIN_FIELD_CANDIDATES),
+                "price":  find_field(f, PRICE_FIELD_CANDIDATES),
+                "dr":     find_field(f, DR_FIELD_CANDIDATES),
+                "record_id": str(f.get("Id", "")),
+                "raw_fields": f,
+            }
+        except Exception as e:
+            results[provider] = {"error": str(e)}
 
     return {"domain": domain, "providers": results}
 
@@ -605,39 +628,24 @@ async def api_medios(
     """
     table_id = TABLES["bazoom"]
 
-    filters = []
+    where_parts = []
     if country:
-        filters.append(f"FIND(LOWER('{country.lower()}'),LOWER({{Country}}))")
+        where_parts.append(f"(Country,like,%{country}%)")
     if price_min is not None:
-        filters.append(f"{{Price}}>={price_min}")
+        where_parts.append(f"(Price,gte,{price_min})")
     if price_max is not None:
-        filters.append(f"{{Price}}<={price_max}")
+        where_parts.append(f"(Price,lte,{price_max})")
+    where = "~and".join(where_parts) if where_parts else ""
 
-    formula = ""
-    if len(filters) == 1:
-        formula = filters[0]
-    elif len(filters) > 1:
-        formula = "AND(" + ",".join(filters) + ")"
+    noco_offset = int(offset) if offset and offset.isdigit() else (page - 1) * 100
+    data = await nocodb_list_page(table_id, where=where, limit=100, offset=noco_offset)
 
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}"
-    params: dict = {"pageSize": 100}
-    if formula:
-        params["filterByFormula"] = formula
-    if offset:
-        params["offset"] = offset
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=AIRTABLE_HEADERS, params=params)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Airtable error: {resp.text}")
-        data = resp.json()
-
-    records = data.get("records", [])
+    records = data.get("list", [])
+    page_info = data.get("pageInfo", {})
     medios = []
-    for rec in records:
-        f = rec["fields"]
+    for f in records:
         medios.append({
-            "id":      rec["id"],
+            "id":      str(f.get("Id", "")),
             "domain":  find_field(f, DOMAIN_FIELD_CANDIDATES) or "",
             "price":   find_field(f, PRICE_FIELD_CANDIDATES),
             "dr":      find_field(f, DR_FIELD_CANDIDATES),
@@ -645,10 +653,11 @@ async def api_medios(
             "raw":     f,
         })
 
+    next_offset = str(noco_offset + 100) if not page_info.get("isLastPage", True) else None
     return {
         "page": page,
         "count": len(medios),
-        "next_offset": data.get("offset"),
+        "next_offset": next_offset,
         "records": medios,
     }
 
@@ -709,10 +718,10 @@ class CampaignUpdate(BaseModel):
 
 
 def _fields_to_campaign(rec: dict) -> dict:
-    """Normaliza un registro Airtable al schema del CRM."""
+    """Normaliza un registro NocoDB al schema del CRM."""
     f = rec.get("fields", {})
     return {
-        "airtable_id": rec["id"],
+        "airtable_id": rec["id"],  # conservamos el nombre para no romper el CRM
         "id": f.get("ID", ""),
         "date": f.get("Date", ""),
         "target_page": f.get("Target Page", ""),
@@ -798,46 +807,31 @@ async def api_campaigns_list(
     """
     table_id = TABLES["linkplans"]
     if not table_id:
-        raise HTTPException(status_code=503, detail="AIRTABLE_LINKPLANS_TABLE no configurado")
+        raise HTTPException(status_code=503, detail="NOCODB_TABLE_LINKPLANS no configurado")
 
-    filters = []
+    where_parts = []
     if status and status.lower() != "all":
-        filters.append(f"{{Content Status}}='{status}'")
+        where_parts.append(f"(Content Status,eq,{status})")
     if country and country.lower() != "all":
-        filters.append(f"FIND(LOWER('{country.lower()}'),LOWER({{Country}}))")
+        where_parts.append(f"(Country,like,%{country}%)")
     if enviar:
-        filters.append(f"LOWER({{Enviar}})='{enviar.lower()}'")
+        where_parts.append(f"(Enviar,like,%{enviar}%)")
+    where = "~and".join(where_parts)
 
-    if len(filters) == 1:
-        formula = filters[0]
-    elif len(filters) > 1:
-        formula = "AND(" + ",".join(filters) + ")"
-    else:
-        formula = "1"
-
-    records = await airtable_list(table_id, formula)
+    records = await nocodb_list(table_id, where=where)
     return {
         "count": len(records),
         "records": [_fields_to_campaign(r) for r in records],
     }
 
 
-@app.get("/api/campaigns/{airtable_id}")
-async def api_campaign_detail(airtable_id: str):
-    """Detalle de una publicación por su Airtable record ID (recXXXX)."""
+@app.get("/api/campaigns/{record_id}")
+async def api_campaign_detail(record_id: str):
+    """Detalle de una publicación por su ID NocoDB."""
     table_id = TABLES["linkplans"]
     if not table_id:
-        raise HTTPException(status_code=503, detail="AIRTABLE_LINKPLANS_TABLE no configurado")
-
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}/{airtable_id}"
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(url, headers=AIRTABLE_HEADERS)
-        if resp.status_code == 404:
-            raise HTTPException(status_code=404, detail="Publicación no encontrada")
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Airtable error: {resp.text}")
-        rec = resp.json()
-
+        raise HTTPException(status_code=503, detail="NOCODB_TABLE_LINKPLANS no configurado")
+    rec = await nocodb_get(table_id, record_id)
     return _fields_to_campaign(rec)
 
 
@@ -846,34 +840,24 @@ async def api_campaign_create(data: CampaignCreate):
     """Crea una nueva publicación en la tabla Linkplans."""
     table_id = TABLES["linkplans"]
     if not table_id:
-        raise HTTPException(status_code=503, detail="AIRTABLE_LINKPLANS_TABLE no configurado")
-
+        raise HTTPException(status_code=503, detail="NOCODB_TABLE_LINKPLANS no configurado")
     fields = _campaign_to_fields(data.model_dump(exclude_none=True))
     if not fields:
         raise HTTPException(status_code=422, detail="No se recibieron campos para crear")
-
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}"
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, headers=AIRTABLE_HEADERS, json={"fields": fields})
-        if resp.status_code not in (200, 201):
-            raise HTTPException(status_code=502, detail=f"Airtable error: {resp.text}")
-        rec = resp.json()
-
+    rec = await nocodb_create(table_id, fields)
     return _fields_to_campaign(rec)
 
 
-@app.patch("/api/campaigns/{airtable_id}")
-async def api_campaign_update(airtable_id: str, data: CampaignUpdate):
+@app.patch("/api/campaigns/{record_id}")
+async def api_campaign_update(record_id: str, data: CampaignUpdate):
     """Actualiza campos de una publicación (live link, comments, status, etc.)."""
     table_id = TABLES["linkplans"]
     if not table_id:
-        raise HTTPException(status_code=503, detail="AIRTABLE_LINKPLANS_TABLE no configurado")
-
+        raise HTTPException(status_code=503, detail="NOCODB_TABLE_LINKPLANS no configurado")
     fields = _campaign_to_fields(data.model_dump(exclude_none=True))
     if not fields:
         raise HTTPException(status_code=422, detail="No se recibieron campos para actualizar")
-
-    rec = await airtable_update(table_id, airtable_id, fields)
+    rec = await nocodb_update(table_id, record_id, fields)
     return _fields_to_campaign(rec)
 
 
@@ -883,27 +867,27 @@ async def api_campaign_update(airtable_id: str, data: CampaignUpdate):
 async def status():
     """
     Resumen de campañas activas.
-    Requiere AIRTABLE_LINKPLANS_TABLE configurado.
+    Requiere NOCODB_TABLE_LINKPLANS configurado.
     """
     table_id = TABLES.get("linkplans", "")
     if not table_id:
         return {
-            "warning": "AIRTABLE_LINKPLANS_TABLE no configurado. Definilo en .env una vez que se cree la tabla con Felipe.",
+            "warning": "NOCODB_TABLE_LINKPLANS no configurado.",
             "counts": {},
         }
 
     counts = {}
     queries = {
-        "pending_wf1":  "OR(LOWER({Enviar})='yes',LOWER({Enviar})='new')",
-        "checking":     "{Content Status}='Checking by Client'",
-        "approved_wf4": "AND({Content Status}='Approved',{Live Link}='')",
-        "live":         "{Live Link}!=''",
-        "total":        "1",
+        "pending_wf1":  "(Enviar,in,yes,new)",
+        "checking":     "(Content Status,eq,Checking by Client)",
+        "approved_wf4": "(Content Status,eq,Approved)",
+        "live":         "(Live Link,isnot,)",
+        "total":        "",
     }
 
-    for key, formula in queries.items():
+    for key, where in queries.items():
         try:
-            rows = await airtable_list(table_id, formula, fields=["W"])
+            rows = await nocodb_list(table_id, where=where)
             counts[key] = len(rows)
         except Exception as e:
             counts[key] = f"error: {e}"
