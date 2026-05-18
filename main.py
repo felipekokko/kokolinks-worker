@@ -604,51 +604,86 @@ async def api_prices(domain: str = Query(..., description="Dominio a buscar, ej:
     return {"domain": domain, "providers": results}
 
 
+def _map_medio(provider: str, f: dict) -> dict:
+    if provider == "bazoom":
+        return {
+            "id":      str(f.get("Id", "")),
+            "domain":  f.get("-") or "",
+            "price":   f.get("col_1"),
+            "country": f.get("Países") or "",
+            "dr": "", "da": "", "language": "", "category": "",
+            "price2": "", "mult_casino": "", "precio_casino": "",
+        }
+    elif provider == "leolytics":
+        return {
+            "id":       str(f.get("Id", "")),
+            "domain":   f.get("Website") or "",
+            "price":    f.get("Pub. (enlace)"),
+            "price2":   f.get("Pub. (mención)"),
+            "dr":       f.get("DR") or "",
+            "da":       f.get("DA") or "",
+            "language": f.get("Idioma") or "",
+            "category": f.get("Categorías principales") or "",
+            "country": "", "mult_casino": "", "precio_casino": "",
+        }
+    elif provider == "whitepress":
+        return {
+            "id":           str(f.get("Id", "")),
+            "domain":       f.get("Website") or "",
+            "price":        f.get("Pub. (enlace)"),
+            "mult_casino":  f.get("Multriplicador Casino") or "",
+            "precio_casino": f.get("Precio Casino") or "",
+            "country": "", "dr": "", "da": "", "language": "", "category": "", "price2": "",
+        }
+    elif provider == "backlinksglobal":
+        return {
+            "id":       str(f.get("Id", "")),
+            "domain":   f.get("site_name") or "",
+            "price":    f.get("offer_price"),
+            "country":  f.get("country") or "",
+            "language": f.get("language") or "",
+            "da":       f.get("da") or "",
+            "dr":       f.get("dr") or "",
+            "category": f.get("category_name") or "",
+            "price2": "", "mult_casino": "", "precio_casino": "",
+        }
+    elif provider == "meup":
+        return {
+            "id":      str(f.get("Id", "")),
+            "domain":  f.get("col_0") or "",
+            "price":   f.get("col_1"),
+            "country": f.get("Países") or "",
+            "dr": "", "da": "", "language": "", "category": "", "price2": "", "mult_casino": "", "precio_casino": "",
+        }
+    return {"id": str(f.get("Id", "")), "domain": "", "price": None}
+
+
 @app.get("/api/medios")
 async def api_medios(
-    page: int = Query(1, ge=1, description="Página (cada 100 registros)"),
-    country: Optional[str] = Query(None, description="Filtrar por país"),
-    price_min: Optional[float] = Query(None, description="Precio mínimo"),
-    price_max: Optional[float] = Query(None, description="Precio máximo"),
-    offset: Optional[str] = Query(None, description="Offset Airtable para paginación"),
+    page: int = Query(1, ge=1),
+    provider: str = Query("bazoom", description="bazoom|leolytics|whitepress|backlinksglobal|meup"),
+    search: Optional[str] = Query(None, description="Buscar por dominio"),
+    offset: Optional[str] = Query(None, description="Offset paginación"),
 ):
-    """
-    Lista paginada de la tabla Bazoom (8090+ registros).
-    Devuelve 100 registros por página junto con el offset para la siguiente.
-    """
-    table_id = TABLES["bazoom"]
+    table_id = TABLES.get(provider, TABLES["bazoom"])
 
-    where_parts = []
-    if country:
-        where_parts.append(f"(Country,like,%{country}%)")
-    if price_min is not None:
-        where_parts.append(f"(Price,gte,{price_min})")
-    if price_max is not None:
-        where_parts.append(f"(Price,lte,{price_max})")
-    where = "~and".join(where_parts) if where_parts else ""
+    # Campo dominio por proveedor para el filtro de búsqueda
+    domain_fields = {
+        "bazoom": "-", "leolytics": "Website", "whitepress": "Website",
+        "backlinksglobal": "site_name", "meup": "col_0",
+    }
+    domain_field = domain_fields.get(provider, "Website")
 
+    where = f"({domain_field},like,%{normalize_domain(search)}%)" if search else ""
     noco_offset = int(offset) if offset and offset.isdigit() else (page - 1) * 100
     data = await nocodb_list_page(table_id, where=where, limit=100, offset=noco_offset)
 
     records = data.get("list", [])
     page_info = data.get("pageInfo", {})
-    medios = []
-    for f in records:
-        medios.append({
-            "id":      str(f.get("Id", "")),
-            "domain":  f.get("-") or find_field(f, DOMAIN_FIELD_CANDIDATES) or "",
-            "price":   f.get("col_1") or find_field(f, PRICE_FIELD_CANDIDATES),
-            "dr":      f.get("col_0") or find_field(f, DR_FIELD_CANDIDATES),
-            "country": f.get("Países") or f.get("Country") or "",
-        })
+    medios = [_map_medio(provider, f) for f in records]
 
     next_offset = str(noco_offset + 100) if not page_info.get("isLastPage", True) else None
-    return {
-        "page": page,
-        "count": len(medios),
-        "next_offset": next_offset,
-        "records": medios,
-    }
+    return {"page": page, "count": len(medios), "next_offset": next_offset, "records": medios}
 
 # ─── Modelos API Campañas ─────────────────────────────────────────────────────
 
