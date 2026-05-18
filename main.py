@@ -605,17 +605,19 @@ async def api_prices(domain: str = Query(..., description="Dominio a buscar, ej:
 
 
 def _map_medio(provider: str, f: dict) -> dict:
-    BAZOOM_COUNTRIES = ["France","Canada","Italia","Hungria","Finlandia","Chile",
-                        "Netherlands","España","Tanzania","Kenya","Uganda","Zambia","Australia"]
     if provider == "bazoom":
-        paises = [p for p in BAZOOM_COUNTRIES if f.get(p)]
         return {
             "id":      str(f.get("Id", "")),
-            "domain":  f.get("-") or "",
+            "website": f.get("-") or "",
             "price":   f.get("col_1"),
-            "country": ", ".join(paises) if paises else "—",
-            "dr": "", "da": "", "language": "", "category": "",
-            "price2": "", "mult_casino": "", "precio_casino": "",
+            "n_paises": f.get("Países") or "",
+            "France": f.get("France") or "", "Canada": f.get("Canada") or "",
+            "Italia": f.get("Italia") or "", "Hungria": f.get("Hungria") or "",
+            "Finlandia": f.get("Finlandia") or "", "Chile": f.get("Chile") or "",
+            "Netherlands": f.get("Netherlands") or "", "España": f.get("España") or "",
+            "Tanzania": f.get("Tanzania") or "", "Kenya": f.get("Kenya") or "",
+            "Uganda": f.get("Uganda") or "", "Zambia": f.get("Zambia") or "",
+            "Australia": f.get("Australia") or "",
         }
     elif provider == "leolytics":
         return {
@@ -652,11 +654,13 @@ def _map_medio(provider: str, f: dict) -> dict:
         }
     elif provider == "meup":
         return {
-            "id":      str(f.get("Id", "")),
-            "domain":  f.get("col_0") or "",
-            "price":   f.get("col_1"),
-            "country": f.get("Países") or "",
-            "dr": "", "da": "", "language": "", "category": "", "price2": "", "mult_casino": "", "precio_casino": "",
+            "id":           str(f.get("Id", "")),
+            "website":      f.get("col_0") or "",
+            "price":        f.get("col_1"),
+            "price_casino": f.get("Países") or "",
+            "country":      f.get("France") or "",
+            "price_eur":    f.get("Italia") or "",
+            "price_casino_eur": f.get("Hungria") or "",
         }
     return {"id": str(f.get("Id", "")), "domain": "", "price": None}
 
