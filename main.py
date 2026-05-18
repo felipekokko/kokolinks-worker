@@ -686,7 +686,7 @@ async def api_medios(
     medios = [_map_medio(provider, f) for f in records]
 
     next_offset = str(noco_offset + 100) if not page_info.get("isLastPage", True) else None
-    return {"page": page, "count": len(medios), "next_offset": next_offset, "records": medios}
+    return {"page": page, "count": len(medios), "total": page_info.get("totalRows", 0), "next_offset": next_offset, "records": medios}
 
 # ─── Modelos API Campañas ─────────────────────────────────────────────────────
 
