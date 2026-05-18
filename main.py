@@ -15,6 +15,7 @@ API CRM:
   GET /health
 """
 
+import asyncio
 import os
 import logging
 import smtplib
@@ -886,44 +887,68 @@ async def status():
 
 @app.get("/api/pricelists")
 async def api_pricelists(
-    search: Optional[str] = Query(None, description="Buscar por dominio"),
+    search: Optional[str] = Query(None, description="Buscar por dominio (mínimo 3 caracteres)"),
     country: Optional[str] = Query(None, description="Filtrar por país"),
-    limit: int = Query(100, le=500),
+    limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ):
     """
-    Devuelve la tabla Price Lists con columnas clave por proveedor.
-    Columnas: Website, Country, DR, Traffic, Precio Kokko, Bazoom, Leolytics, WhitePress, BacklinksGlobal, MeUp
+    Cruza las 5 tablas de proveedores en paralelo para un dominio buscado.
+    Sin búsqueda devuelve los primeros N dominios de Bazoom con precios cruzados.
     """
-    table_id = TABLES["price_lists"]
-
-    where_parts = []
+    # Proveedor base: Bazoom (8k+ dominios, campo dominio = "-")
+    bz_where = ""
     if search:
-        where_parts.append(f"(Website,like,%{search}%)")
+        bz_where = f"(-,like,%{normalize_domain(search)}%)"
     if country:
-        where_parts.append(f"(Country,like,%{country}%)")
-    where = "~and".join(where_parts)
+        bz_where = ("~and".join([bz_where, f"(Países,like,%{country}%)"]) if bz_where
+                    else f"(Países,like,%{country}%)")
 
-    data = await nocodb_list_page(table_id, where=where, limit=limit, offset=offset)
-    rows = data.get("list", [])
-    page_info = data.get("pageInfo", {})
+    bz_data = await nocodb_list_page(TABLES["bazoom"], where=bz_where, limit=limit, offset=offset)
+    bz_rows = bz_data.get("list", [])
+    page_info = bz_data.get("pageInfo", {})
+
+    if not bz_rows:
+        return {"total": 0, "offset": offset, "is_last_page": True, "records": []}
+
+    # Para cada dominio de Bazoom buscar precio en los otros proveedores en paralelo
+    async def lookup_provider(table_id: str, domain_field: str, price_field: str, domain: str):
+        target = normalize_domain(domain)
+        try:
+            data = await nocodb_list_page(table_id, where=f"({domain_field},like,%{target}%)", limit=3)
+            rows = data.get("list", [])
+            if rows:
+                return str(rows[0].get(price_field) or "")
+        except Exception:
+            pass
+        return ""
 
     records = []
-    for r in rows:
+    for bz in bz_rows:
+        domain = str(bz.get("-") or "")
+        if not domain:
+            continue
+        paises   = str(bz.get("Países") or "")
+        dr       = str(bz.get("dr") or "")
+        bz_price = str(bz.get("col_1") or "")  # col_1 = precio Bazoom
+
+        # Buscar en paralelo en Leolytics, WhitePress, BacklinksGlobal
+        leo_task = lookup_provider(TABLES["leolytics"],        "Website",   "Pub. (enlace)", domain)
+        wp_task  = lookup_provider(TABLES["whitepress"],       "Website",   "Pub. (enlace)", domain)
+        bg_task  = lookup_provider(TABLES["backlinksglobal"],  "site_name", "offer_price",   domain)
+
+        leo_price, wp_price, bg_price = await asyncio.gather(leo_task, wp_task, bg_task)
+
         records.append({
-            "id":           str(r.get("Id", "")),
-            "website":      r.get("Website") or r.get("col_0") or "",
-            "bbdd":         r.get("¿BBDD?") or r.get("col_1") or "",
-            "country":      r.get("Country") or r.get("col_2") or "",
-            "dr":           r.get("DR") or r.get("col_3") or "",
-            "traffic":      r.get("Traffic") or r.get("col_4") or "",
-            "precio_kokko": r.get("PRECIOS KOKKO") or r.get("col_5") or "",
-            "p_casino":     r.get("P. CASINO") or r.get("col_6") or "",
-            "bazoom":       r.get("PRECIO") or r.get("col_8") or "",
-            "leolytics":    r.get("PRECIO_1") or r.get("col_11") or "",
-            "whitepress":   r.get("PRECIO_2") or r.get("col_14") or "",
-            "backlinks":    r.get("PRECIO_3") or r.get("col_17") or "",
-            "meup":         r.get("PRECIO_4") or r.get("col_18") or "",
+            "id":       str(bz.get("Id", "")),
+            "website":  domain,
+            "country":  paises,
+            "dr":       dr,
+            "bazoom":   str(bz.get("col_1") or ""),
+            "leolytics":   leo_price,
+            "whitepress":  wp_price,
+            "backlinks":   bg_price,
+            "meup":        "",
         })
 
     return {
