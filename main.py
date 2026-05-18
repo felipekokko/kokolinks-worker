@@ -636,11 +636,10 @@ async def api_medios(
     for f in records:
         medios.append({
             "id":      str(f.get("Id", "")),
-            "domain":  find_field(f, DOMAIN_FIELD_CANDIDATES) or "",
-            "price":   find_field(f, PRICE_FIELD_CANDIDATES),
-            "dr":      find_field(f, DR_FIELD_CANDIDATES),
-            "country": f.get("Country", f.get("country", "")),
-            "raw":     f,
+            "domain":  f.get("-") or find_field(f, DOMAIN_FIELD_CANDIDATES) or "",
+            "price":   f.get("col_1") or find_field(f, PRICE_FIELD_CANDIDATES),
+            "dr":      f.get("col_0") or find_field(f, DR_FIELD_CANDIDATES),
+            "country": f.get("Países") or f.get("Country") or "",
         })
 
     next_offset = str(noco_offset + 100) if not page_info.get("isLastPage", True) else None
