@@ -687,7 +687,8 @@ async def api_medios(
 
     records = data.get("list", [])
     page_info = data.get("pageInfo", {})
-    medios = [_map_medio(provider, f) for f in records]
+    # Devolver campos raw de NocoDB — el CRM lee rec[field] directamente por nombre de columna
+    medios = [{"id": str(f.get("Id", "")), **{k: v for k, v in f.items() if k not in ("Id", "CreatedAt", "UpdatedAt")}} for f in records]
 
     next_offset = str(noco_offset + 100) if not page_info.get("isLastPage", True) else None
     return {"page": page, "count": len(medios), "total": page_info.get("totalRows", 0), "next_offset": next_offset, "records": medios}
