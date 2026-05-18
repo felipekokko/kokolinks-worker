@@ -1047,6 +1047,33 @@ async def api_medios_add(body: dict):
     return r.json()
 
 
+@app.patch("/api/medios/update")
+async def api_medios_update(body: dict):
+    """
+    Actualiza un campo de un registro en la tabla de precios del proveedor.
+    Body: { provider, table_id, record_id, field, value }
+    """
+    table_id  = body.get("table_id")
+    record_id = body.get("record_id")
+    field     = body.get("field")
+    value     = body.get("value")
+
+    if not table_id or not record_id or field is None:
+        raise HTTPException(status_code=400, detail="table_id, record_id y field son requeridos")
+
+    url = f"{NOCODB_URL}/api/v2/tables/{table_id}/records"
+    payload = {"Id": int(record_id) if str(record_id).isdigit() else record_id, field: value}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.patch(url, headers=NOCODB_HEADERS, json=payload)
+
+    if r.status_code not in (200, 201):
+        logger.error(f"NocoDB medios update error {r.status_code}: {r.text}")
+        raise HTTPException(status_code=502, detail=f"NocoDB error: {r.text}")
+
+    return {"ok": True, "record_id": record_id, "field": field, "value": value}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "kokolinks-worker"}
