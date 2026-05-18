@@ -1079,6 +1079,115 @@ async def api_medios_update(body: dict):
     return {"ok": True, "record_id": record_id, "field": field, "value": value}
 
 
+@app.post("/cron/process")
+async def cron_process():
+    """
+    Procesa automáticamente las campañas según su estado.
+    Llamado cada 5 minutos por n8n.
+    - Enviar = yes/new y WF1_sent IS NULL → ejecuta WF1
+    - Content Status = Checking by Client y WF3_sent IS NULL → ejecuta WF3
+    - Content Status = Approved y WF4_sent IS NULL → ejecuta WF4
+    - Live Link filled y WF2_sent IS NULL → ejecuta WF2
+    """
+    table_id = TABLES["linkplans"]
+    results = {"wf1": [], "wf2": [], "wf3": [], "wf4": [], "errors": []}
+
+    try:
+        # WF1 — Enviar = yes o new, sin WF1_sent
+        wf1_records = await nocodb_list(table_id,
+            where="(Enviar,in,yes,new)~and(WF1_sent,is,null)")
+        for rec in wf1_records:
+            f = rec["fields"]
+            rid = rec["id"]
+            email = f.get("Contact Email") or f.get("contact_email") or ""
+            domain = f.get("Domain") or f.get("domain") or ""
+            if not email:
+                continue
+            try:
+                template = await _get_template_by_wf("wf1")
+                subject = template.get("fields", {}).get("Asunto", "Contacto de link building")
+                body = template.get("fields", {}).get("Cuerpo", "")
+                body = body.replace("{{domain}}", domain)
+                send_email(email, subject, body)
+                await nocodb_update(table_id, rid, {"WF1_sent": "yes", "Enviar": "Sent"})
+                results["wf1"].append({"id": rid, "domain": domain, "email": email})
+            except Exception as e:
+                results["errors"].append({"wf": "wf1", "id": rid, "error": str(e)})
+
+        # WF3 — Content Status = Checking by Client, sin WF3_sent
+        wf3_records = await nocodb_list(table_id,
+            where="(Content Status,eq,Checking by Client)~and(WF3_sent,is,null)")
+        for rec in wf3_records:
+            f = rec["fields"]
+            rid = rec["id"]
+            email = f.get("Contact Email") or f.get("contact_email") or ""
+            domain = f.get("Domain") or f.get("domain") or ""
+            if not email:
+                continue
+            try:
+                template = await _get_template_by_wf("wf3")
+                subject = template.get("fields", {}).get("Asunto", "Artículo para revisión")
+                body = template.get("fields", {}).get("Cuerpo", "")
+                body = body.replace("{{domain}}", domain)
+                send_email(email, subject, body)
+                await nocodb_update(table_id, rid, {"WF3_sent": "yes"})
+                results["wf3"].append({"id": rid, "domain": domain})
+            except Exception as e:
+                results["errors"].append({"wf": "wf3", "id": rid, "error": str(e)})
+
+        # WF4 — Content Status = Approved, sin WF4_sent
+        wf4_records = await nocodb_list(table_id,
+            where="(Content Status,eq,Approved)~and(WF4_sent,is,null)")
+        for rec in wf4_records:
+            f = rec["fields"]
+            rid = rec["id"]
+            email = f.get("Contact Email") or f.get("contact_email") or ""
+            domain = f.get("Domain") or f.get("domain") or ""
+            if not email:
+                continue
+            try:
+                template = await _get_template_by_wf("wf4")
+                subject = template.get("fields", {}).get("Asunto", "Solicitud de publicación")
+                body = template.get("fields", {}).get("Cuerpo", "")
+                body = body.replace("{{domain}}", domain)
+                send_email(email, subject, body)
+                await nocodb_update(table_id, rid, {"WF4_sent": "yes"})
+                results["wf4"].append({"id": rid, "domain": domain})
+            except Exception as e:
+                results["errors"].append({"wf": "wf4", "id": rid, "error": str(e)})
+
+        # WF2 — Live Link filled, sin WF2_sent
+        wf2_records = await nocodb_list(table_id,
+            where="(Live Link,isnot,null)~and(WF2_sent,is,null)")
+        for rec in wf2_records:
+            f = rec["fields"]
+            rid = rec["id"]
+            live_link = f.get("Live Link") or f.get("live_link") or ""
+            domain = f.get("Domain") or f.get("domain") or ""
+            if not live_link or not live_link.startswith("http"):
+                continue
+            try:
+                await nocodb_update(table_id, rid, {"WF2_sent": "yes", "Link Status": "Live"})
+                results["wf2"].append({"id": rid, "domain": domain, "live_link": live_link})
+            except Exception as e:
+                results["errors"].append({"wf": "wf2", "id": rid, "error": str(e)})
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    total = sum(len(v) for k, v in results.items() if k != "errors")
+    return {"status": "ok", "processed": total, "details": results}
+
+
+async def _get_template_by_wf(wf: str) -> dict:
+    """Busca el template de email para un WF dado."""
+    table_id = TABLES["templates"]
+    records = await nocodb_list(table_id, where=f"(WF,eq,{wf})")
+    if records:
+        return records[0]
+    return {"fields": {}}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "kokolinks-worker"}
