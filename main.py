@@ -970,6 +970,21 @@ async def api_template_by_wf(wf_id: str):
     return records[0]
 
 
+@app.post("/api/medios/add", status_code=201)
+async def api_medios_add(body: dict):
+    """Agrega un medio nuevo a la tabla de precios del proveedor indicado."""
+    table_id = body.get("table_id")
+    data = body.get("data", {})
+    if not table_id or not data:
+        raise HTTPException(status_code=400, detail="table_id y data son requeridos")
+    url = f"{NOCODB_URL}/api/v2/tables/{table_id}/records"
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(url, headers=NOCODB_HEADERS, json=data)
+    if r.status_code not in (200, 201):
+        raise HTTPException(status_code=502, detail=f"NocoDB error: {r.text}")
+    return r.json()
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "kokolinks-worker"}
