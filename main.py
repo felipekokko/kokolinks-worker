@@ -605,12 +605,15 @@ async def api_prices(domain: str = Query(..., description="Dominio a buscar, ej:
 
 
 def _map_medio(provider: str, f: dict) -> dict:
+    BAZOOM_COUNTRIES = ["France","Canada","Italia","Hungria","Finlandia","Chile",
+                        "Netherlands","España","Tanzania","Kenya","Uganda","Zambia","Australia"]
     if provider == "bazoom":
+        paises = [p for p in BAZOOM_COUNTRIES if f.get(p)]
         return {
             "id":      str(f.get("Id", "")),
             "domain":  f.get("-") or "",
             "price":   f.get("col_1"),
-            "country": f.get("Países") or "",
+            "country": ", ".join(paises) if paises else "—",
             "dr": "", "da": "", "language": "", "category": "",
             "price2": "", "mult_casino": "", "precio_casino": "",
         }
